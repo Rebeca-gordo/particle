@@ -1,3 +1,5 @@
+alert("VERSION NUEVA ✅ 123");
+
 /* particles-webflow.js — Webflow + Three.js + GSAP
    Modo "click + drag" (SIN zoom / SIN explosión al soltar):
    - Pointer DOWN: activa fuerza, el flujo sigue el cursor mientras arrastras
