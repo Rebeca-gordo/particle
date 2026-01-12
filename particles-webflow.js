@@ -1,33 +1,38 @@
 /* particles-webflow.js — Webflow + Three.js + GSAP
-   Efecto: cada CLICK crea un vórtice (remolino) en esa zona.
-   - No hay zoom global.
-   - Puedes ir clicando en diferentes puntos y se generan formas/remolinos.
+   Modo "click + drag" (SIN zoom / SIN explosión al soltar):
+   - Pointer DOWN: activa fuerza, el flujo sigue el cursor mientras arrastras
+   - Pointer UP: NO hay release kick, solo se desvanece la fuerza y queda movimiento natural
 */
 (() => {
-  console.log("particles-webflow.js loaded (multi-vortex)");
+  console.log("particles-webflow.js loaded (drag-flow)");
 
   const params = {
-    particleCount: 14000,
-    radius: 190,
+    particleCount: 16000,
+    radius: 210,
     baseSize: 1.15,
 
-    cameraRadius: 280,
-    cameraHeight: 150,
+    cameraRadius: 300,
+    cameraHeight: 160,
 
-    damping: 0.985,
-    noise: 0.00045,
-    cursorLerp: 0.1,
+    // movimiento base
+    damping: 0.992,       // persistencia (memoria)
+    noise: 0.00018,       // flotación natural
 
-    // Vortex behavior
-    vortexLifeMs: 1400,       // cuánto dura un vórtice
-    vortexMax: 7,             // máximo de vórtices simultáneos
-    vortexRadius: 70,         // radio de influencia en mundo
-    vortexPull: 0.020,        // atracción al centro del vórtice
-    vortexSwirl: 0.060,       // fuerza de remolino
-    vortexTurbulence: 0.012,  // jitter/turbulencia extra cerca del vórtice
+    cursorLerp: 0.12,
 
-    // Bound
-    maxRadiusFactor: 1.35
+    // influencia del brush (cometa)
+    brushRadius: 110,     // área afectada alrededor del cursor
+    pull: 0.050,          // núcleo denso
+    flow: 0.040,          // cola direccional
+    swirl: 0.004,         // mínimo (casi nada de remolino circular)
+    turbulence: 0.010,    // orgánico
+
+    // límites
+    maxRadiusFactor: 1.42,
+
+    // timings GSAP
+    downIn: 0.18,         // entrada al hacer click
+    upOut: 0.45           // salida al soltar (sin “kick”)
   };
 
   if (typeof THREE === "undefined") {
@@ -53,8 +58,14 @@
   const targetCursor = new THREE.Vector3();
   const cursor3D = new THREE.Vector3();
 
-  // Guardamos múltiples vórtices
-  const vortices = []; // { pos: Vector3, strength: number, swirl: number, created: number }
+  // Brush único que sigue el cursor mientras arrastras
+  const brush = {
+    pos: new THREE.Vector3(),
+    dir: new THREE.Vector3(1, 0, 0), // dirección inicial
+    strength: 0,                     // animada por GSAP (0..1)
+    isDown: false
+  };
+  const prevBrushPos = new THREE.Vector3();
 
   function setRendererSize() {
     const rect = canvas.getBoundingClientRect();
@@ -74,13 +85,14 @@
   function createParticles() {
     const count = params.particleCount;
     const geom = new THREE.BufferGeometry();
+
     positions = new Float32Array(count * 3);
     velocities = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
 
-      const r = Math.pow(Math.random(), 0.8) * params.radius;
+      const r = Math.pow(Math.random(), 0.75) * params.radius;
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
 
@@ -93,7 +105,7 @@
 
     geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
-    // hard-edge circle sprite
+    // sprite circular hard-edge
     const sprite = document.createElement("canvas");
     sprite.width = 48; sprite.height = 48;
     const ctx = sprite.getContext("2d");
@@ -151,17 +163,22 @@
 
     window.addEventListener("pointermove", onPointerMove, { passive: true });
     window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
 
-    // init cursor en el centro
+    // cursor inicial centrado
     mouseNdc.set(0, 0);
     raycaster.setFromCamera(mouseNdc, camera);
     raycaster.ray.intersectPlane(plane, targetCursor);
     cursor3D.copy(targetCursor);
 
+    brush.pos.copy(cursor3D);
+    prevBrushPos.copy(cursor3D);
+
     animate();
   }
 
-  function onPointerMove(e) {
+  function updateTargetFromEvent(e) {
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
@@ -173,129 +190,138 @@
     raycaster.ray.intersectPlane(plane, targetCursor);
   }
 
-  function addVortex(worldPos) {
-    // Limita cantidad
-    if (vortices.length >= params.vortexMax) vortices.shift();
-
-    const v = {
-      pos: worldPos.clone(),
-      strength: 0,   // lo animamos con GSAP
-      swirl: 0,
-      created: performance.now()
-    };
-    vortices.push(v);
-
-    // Animación: sube rápido, luego cae suave
-    gsap.to(v, { strength: 1, duration: 0.18, ease: "power2.out" });
-    gsap.to(v, { swirl: 1, duration: 0.22, ease: "power2.out" });
-
-    // fade-out con retraso leve (para que “dibuje”)
-    gsap.to(v, {
-      strength: 0,
-      duration: params.vortexLifeMs / 1000,
-      ease: "power3.out",
-      delay: 0.05
-    });
-    gsap.to(v, {
-      swirl: 0,
-      duration: (params.vortexLifeMs / 1000) * 0.9,
-      ease: "power3.out",
-      delay: 0.08
-    });
+  function onPointerMove(e) {
+    updateTargetFromEvent(e);
   }
 
-  function onPointerDown() {
-    // fija el cursor 3D justo en el click
+  function onPointerDown(e) {
+    updateTargetFromEvent(e);
+
+    brush.isDown = true;
+
+    // fija posición del brush al cursor
     cursor3D.copy(targetCursor);
+    brush.pos.copy(cursor3D);
+    prevBrushPos.copy(cursor3D);
 
-    // crea vórtice en esa posición
-    addVortex(cursor3D);
+    // si quieres una dirección inicial hacia la derecha (como tu referencia)
+    brush.dir.set(1, 0, 0);
+
+    // entra la fuerza (SIN explosión luego)
+    gsap.killTweensOf(brush);
+    gsap.to(brush, { strength: 1, duration: params.downIn, ease: "power2.out" });
   }
 
-  const tmpV = new THREE.Vector3();
+  function onPointerUp() {
+    brush.isDown = false;
+
+    // se desvanece la fuerza, pero NO hay “kick”
+    gsap.killTweensOf(brush);
+    gsap.to(brush, { strength: 0, duration: params.upOut, ease: "power2.out" });
+  }
+
   let t = 0;
 
   function animate() {
     requestAnimationFrame(animate);
     t += 0.01;
 
-    // Cámara con orbit suave (solo estética, no zoom)
-    const ang = t * 0.06;
+    // Cámara orbit suave (estética). NO zoom, no cambios bruscos.
+    const ang = t * 0.05;
     camera.position.x = Math.sin(ang) * params.cameraRadius;
     camera.position.z = Math.cos(ang) * params.cameraRadius;
     camera.position.y = params.cameraHeight;
     camera.lookAt(0, 0, 0);
 
-    // cursor suavizado (por si quieres usarlo luego)
+    // cursor suavizado
     cursor3D.lerp(targetCursor, params.cursorLerp);
 
-    // limpia vórtices “muertos”
-    for (let i = vortices.length - 1; i >= 0; i--) {
-      if (vortices[i].strength <= 0.0005 && vortices[i].swirl <= 0.0005) {
-        vortices.splice(i, 1);
+    // mientras arrastras: el brush sigue el cursor + calcula dirección del trazo
+    if (brush.isDown) {
+      brush.pos.lerp(cursor3D, 0.35);
+
+      const dx = brush.pos.x - prevBrushPos.x;
+      const dy = brush.pos.y - prevBrushPos.y;
+      const dz = brush.pos.z - prevBrushPos.z;
+
+      // si hay movimiento real, actualiza dirección del flujo según el arrastre
+      const dlen = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (dlen > 0.001) {
+        brush.dir.set(dx / dlen, dy / dlen, dz / dlen);
+      } else {
+        // si casi no mueves, sesgo suave a derecha
+        brush.dir.lerp(new THREE.Vector3(1, 0, 0), 0.02).normalize();
       }
+
+      prevBrushPos.copy(brush.pos);
+    } else {
+      // en idle: la dirección se relaja lentamente hacia derecha (opcional)
+      brush.dir.lerp(new THREE.Vector3(1, 0, 0), 0.004).normalize();
     }
 
     const posAttr = points.geometry.attributes.position;
     const p = posAttr.array;
 
+    const R = params.brushRadius;
+    const maxR = params.radius * params.maxRadiusFactor;
+
     for (let i = 0; i < p.length; i += 3) {
       let x = p[i], y = p[i + 1], z = p[i + 2];
       let vx = velocities[i], vy = velocities[i + 1], vz = velocities[i + 2];
 
-      // ruido base (idle)
+      // flotación natural constante
       vx += (Math.random() - 0.5) * params.noise;
       vy += (Math.random() - 0.5) * params.noise;
-      vz += (Math.random() - 0.5) * params.noise;
+      vz += (Math.random() - 0.5) * (params.noise * 0.8);
 
-      // Aplica cada vórtice (local)
-      for (let k = 0; k < vortices.length; k++) {
-        const v = vortices[k];
-        if (v.strength <= 0.0001 && v.swirl <= 0.0001) continue;
+      // efecto brush (solo si hay strength > 0)
+      const s = brush.strength;
+      if (s > 0.0005) {
+        const bx = brush.pos.x, by = brush.pos.y, bz = brush.pos.z;
+        const dx = bx - x, dy = by - y, dz = bz - z;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
 
-        const dx = v.pos.x - x;
-        const dy = v.pos.y - y;
-        const dz = v.pos.z - z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6;
+        if (dist < R) {
+          const influence = 1 - (dist / R);
+          const inf2 = influence * influence;
 
-        // Solo afecta si está cerca del vórtice
-        const R = params.vortexRadius;
-        if (dist > R) continue;
+          // 1) Pull al núcleo (compacta)
+          const pull = params.pull * s * inf2;
+          vx += (dx / dist) * pull;
+          vy += (dy / dist) * pull;
+          vz += (dz / dist) * pull;
 
-        // Influencia fuerte cerca, cae hacia el borde
-        const influence = 1 - (dist / R);
-        const inf2 = influence * influence;
+          // 2) Flow direccional (cola según tu arrastre)
+          const flow = params.flow * s * inf2;
+          vx += brush.dir.x * flow;
+          vy += brush.dir.y * flow;
+          vz += brush.dir.z * flow;
 
-        // Pull hacia el centro (crea “forma”)
-        const pull = params.vortexPull * v.strength * inf2;
-        vx += (dx / dist) * pull;
-        vy += (dy / dist) * pull;
-        vz += (dz / dist) * pull;
+          // 3) Swirl mínimo (solo textura)
+          const swirl = params.swirl * s * inf2;
+          vx += (-dy / dist) * swirl;
+          vy += ( dx / dist) * swirl;
 
-        // Swirl en el plano XY (remolino alrededor del punto)
-        const swirl = params.vortexSwirl * v.swirl * inf2;
-        // tangente simple: rota (dx,dy) -> (-dy, dx)
-        vx += (-dy / dist) * swirl;
-        vy += ( dx / dist) * swirl;
-
-        // Turbulencia adicional cerca del centro para “dibujar” curvas
-        const turb = params.vortexTurbulence * v.swirl * inf2;
-        vx += (Math.random() - 0.5) * turb;
-        vy += (Math.random() - 0.5) * turb;
-        vz += (Math.random() - 0.5) * (turb * 0.6);
+          // 4) Turbulencia suave
+          const turb = params.turbulence * s * inf2;
+          vx += (Math.random() - 0.5) * turb;
+          vy += (Math.random() - 0.5) * turb;
+          vz += (Math.random() - 0.5) * (turb * 0.7);
+        }
       }
 
-      // damping
-      vx *= params.damping; vy *= params.damping; vz *= params.damping;
+      // damping (persistencia)
+      vx *= params.damping;
+      vy *= params.damping;
+      vz *= params.damping;
 
       x += vx; y += vy; z += vz;
 
-      // bound suave: mantenemos la nube compacta
-      const len = Math.sqrt(x * x + y * y + z * z);
-      const maxR = params.radius * params.maxRadiusFactor;
+      // bound suave
+      const len = Math.sqrt(x*x + y*y + z*z);
       if (len > maxR) {
-        const k = maxR / (len + 1e-6);
-        x *= k; y *= k; z *= k;
+        const sc = maxR / (len + 1e-6);
+        x *= sc; y *= sc; z *= sc;
         vx *= 0.35; vy *= 0.35; vz *= 0.35;
       }
 
