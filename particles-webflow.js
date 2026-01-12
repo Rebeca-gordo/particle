@@ -1,42 +1,61 @@
+/* particles-webflow.js — Webflow + Three.js + GSAP
+   Efecto: cada CLICK crea un vórtice (remolino) en esa zona.
+   - No hay zoom global.
+   - Puedes ir clicando en diferentes puntos y se generan formas/remolinos.
+*/
 (() => {
-  // ========= CONFIG =========
+  console.log("particles-webflow.js loaded (multi-vortex)");
+
   const params = {
-    particleCount: 12000,     // sube/baja
-    radius: 180,
+    particleCount: 14000,
+    radius: 190,
     baseSize: 1.15,
-    cameraRadius: 260,
-    cameraHeight: 140,
+
+    cameraRadius: 280,
+    cameraHeight: 150,
+
     damping: 0.985,
-    noise: 0.00055,
-    cursorLerp: 0.08,
-    influenceNdcRadius: 0.22, // radio de influencia en pantalla (0..1)
-    maxForce: 0.035,          // fuerza max hacia cursor
-    swirlBase: 0.018,         // swirl base
-    releaseKick: 0.11         // impulso al soltar
+    noise: 0.00045,
+    cursorLerp: 0.1,
+
+    // Vortex behavior
+    vortexLifeMs: 1400,       // cuánto dura un vórtice
+    vortexMax: 7,             // máximo de vórtices simultáneos
+    vortexRadius: 70,         // radio de influencia en mundo
+    vortexPull: 0.020,        // atracción al centro del vórtice
+    vortexSwirl: 0.060,       // fuerza de remolino
+    vortexTurbulence: 0.012,  // jitter/turbulencia extra cerca del vórtice
+
+    // Bound
+    maxRadiusFactor: 1.35
   };
 
-  // ========= STATE / UNIFORMS CONTROLADOS POR GSAP =========
-  const u = {
-    attract: 0,   // 0..1 (click)
-    swirl: 0,     // 0..1 (click)
-    release: 0,   // 0..1 (al soltar)
-    idle: 1       // 0..1 (para bajar movimiento si quieres)
-  };
+  if (typeof THREE === "undefined") {
+    console.error("THREE is not loaded. Add three.min.js before this script.");
+    return;
+  }
+  if (typeof gsap === "undefined") {
+    console.error("GSAP is not loaded. Add gsap.min.js before this script.");
+    return;
+  }
 
-  // ========= DOM =========
   const canvas = document.getElementById("bg");
-  if (!canvas) return;
+  if (!canvas) {
+    console.error('Canvas #bg not found. Add: <canvas id="bg"></canvas>');
+    return;
+  }
 
-  // ========= THREE GLOBALS =========
   let scene, camera, renderer, points;
-  let positions, basePositions, velocities;
+  let positions, velocities;
+
   let raycaster, plane;
   const mouseNdc = new THREE.Vector2(0, 0);
-  const cursor3D = new THREE.Vector3();
   const targetCursor = new THREE.Vector3();
-  let isPointerDown = false;
+  const cursor3D = new THREE.Vector3();
 
-  // ========= HELPERS: resize al tamaño real del canvas (Webflow-friendly) =========
+  // Guardamos múltiples vórtices
+  const vortices = []; // { pos: Vector3, strength: number, swirl: number, created: number }
+
   function setRendererSize() {
     const rect = canvas.getBoundingClientRect();
     const w = Math.max(1, rect.width);
@@ -46,83 +65,35 @@
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
 
-    // DPR adaptativo para no freír GPU
     const area = w * h;
     const isSmall = area < 900 * 300;
     const dpr = window.devicePixelRatio || 1;
     renderer.setPixelRatio(Math.min(dpr, isSmall ? 1 : 1.5));
   }
 
-  // ========= INIT =========
-  function init() {
-    scene = new THREE.Scene();
-
-    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 3000);
-    camera.position.set(0, params.cameraHeight, params.cameraRadius);
-
-    renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-    renderer.setClearAlpha(0);
-
-    // Color space (r152+)
-    if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-    raycaster = new THREE.Raycaster();
-    plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-
-    createParticles();
-    setRendererSize();
-
-    // ResizeObserver (mejor que window.resize en Webflow)
-    const ro = new ResizeObserver(() => setRendererSize());
-    ro.observe(canvas);
-
-    // Pointer events
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-
-    // Start cursor centered
-    mouseNdc.set(0, 0);
-    raycaster.setFromCamera(mouseNdc, camera);
-    raycaster.ray.intersectPlane(plane, targetCursor);
-    cursor3D.copy(targetCursor);
-
-    animate();
-  }
-
-  // ========= PARTICLES =========
   function createParticles() {
     const count = params.particleCount;
-
     const geom = new THREE.BufferGeometry();
     positions = new Float32Array(count * 3);
-    basePositions = new Float32Array(count * 3);
     velocities = new Float32Array(count * 3);
 
-    // Distribución: esfera compacta
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
 
-      const r = Math.pow(Math.random(), 0.75) * params.radius;
+      const r = Math.pow(Math.random(), 0.8) * params.radius;
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
 
-      const x = r * Math.sin(phi) * Math.cos(theta);
-      const y = r * Math.sin(phi) * Math.sin(theta);
-      const z = r * Math.cos(phi);
+      positions[i3]     = r * Math.sin(phi) * Math.cos(theta);
+      positions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i3 + 2] = r * Math.cos(phi);
 
-      positions[i3] = x; positions[i3 + 1] = y; positions[i3 + 2] = z;
-      basePositions[i3] = x; basePositions[i3 + 1] = y; basePositions[i3 + 2] = z;
-
-      velocities[i3] = 0;
-      velocities[i3 + 1] = 0;
-      velocities[i3 + 2] = 0;
+      velocities[i3] = velocities[i3 + 1] = velocities[i3 + 2] = 0;
     }
 
     geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
-    // Sprite circular hard-edge
+    // hard-edge circle sprite
     const sprite = document.createElement("canvas");
     sprite.width = 48; sprite.height = 48;
     const ctx = sprite.getContext("2d");
@@ -143,7 +114,7 @@
       sizeAttenuation: true,
       map: tex,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.62,
       blending: THREE.AdditiveBlending,
       depthTest: false,
       depthWrite: false
@@ -155,7 +126,41 @@
     scene.add(points);
   }
 
-  // ========= INPUT =========
+  function init() {
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 3000);
+    camera.position.set(0, params.cameraHeight, params.cameraRadius);
+
+    renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setClearAlpha(0);
+    if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    raycaster = new THREE.Raycaster();
+    plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+    createParticles();
+    setRendererSize();
+
+    try {
+      const ro = new ResizeObserver(() => setRendererSize());
+      ro.observe(canvas);
+    } catch {
+      window.addEventListener("resize", setRendererSize);
+    }
+
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+
+    // init cursor en el centro
+    mouseNdc.set(0, 0);
+    raycaster.setFromCamera(mouseNdc, camera);
+    raycaster.ray.intersectPlane(plane, targetCursor);
+    cursor3D.copy(targetCursor);
+
+    animate();
+  }
+
   function onPointerMove(e) {
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
@@ -168,47 +173,68 @@
     raycaster.ray.intersectPlane(plane, targetCursor);
   }
 
+  function addVortex(worldPos) {
+    // Limita cantidad
+    if (vortices.length >= params.vortexMax) vortices.shift();
+
+    const v = {
+      pos: worldPos.clone(),
+      strength: 0,   // lo animamos con GSAP
+      swirl: 0,
+      created: performance.now()
+    };
+    vortices.push(v);
+
+    // Animación: sube rápido, luego cae suave
+    gsap.to(v, { strength: 1, duration: 0.18, ease: "power2.out" });
+    gsap.to(v, { swirl: 1, duration: 0.22, ease: "power2.out" });
+
+    // fade-out con retraso leve (para que “dibuje”)
+    gsap.to(v, {
+      strength: 0,
+      duration: params.vortexLifeMs / 1000,
+      ease: "power3.out",
+      delay: 0.05
+    });
+    gsap.to(v, {
+      swirl: 0,
+      duration: (params.vortexLifeMs / 1000) * 0.9,
+      ease: "power3.out",
+      delay: 0.08
+    });
+  }
+
   function onPointerDown() {
-    isPointerDown = true;
+    // fija el cursor 3D justo en el click
+    cursor3D.copy(targetCursor);
 
-    // GSAP: entra la atracción (bonito y controlable)
-    gsap.killTweensOf(u);
-    gsap.to(u, { attract: 1, duration: 0.25, ease: "power2.out" });
-    gsap.to(u, { swirl: 1, duration: 0.35, ease: "power2.out" });
-    gsap.to(u, { release: 0, duration: 0.2, ease: "power2.out" });
+    // crea vórtice en esa posición
+    addVortex(cursor3D);
   }
 
-  function onPointerUp() {
-    isPointerDown = false;
-
-    // GSAP: suelta y “explosión” suave
-    gsap.killTweensOf(u);
-    gsap.to(u, { attract: 0, duration: 0.35, ease: "power2.out" });
-    gsap.to(u, { swirl: 0, duration: 0.55, ease: "power2.out" });
-
-    // release sube rápido y cae (impulso)
-    u.release = 1;
-    gsap.to(u, { release: 0, duration: 0.9, ease: "power3.out" });
-  }
-
-  // ========= LOOP =========
   const tmpV = new THREE.Vector3();
-  const tmpN = new THREE.Vector3();
   let t = 0;
 
   function animate() {
     requestAnimationFrame(animate);
     t += 0.01;
 
-    // Cámara: orbit lento para vida
-    const ang = t * 0.08;
+    // Cámara con orbit suave (solo estética, no zoom)
+    const ang = t * 0.06;
     camera.position.x = Math.sin(ang) * params.cameraRadius;
     camera.position.z = Math.cos(ang) * params.cameraRadius;
     camera.position.y = params.cameraHeight;
     camera.lookAt(0, 0, 0);
 
-    // Cursor suavizado
+    // cursor suavizado (por si quieres usarlo luego)
     cursor3D.lerp(targetCursor, params.cursorLerp);
+
+    // limpia vórtices “muertos”
+    for (let i = vortices.length - 1; i >= 0; i--) {
+      if (vortices[i].strength <= 0.0005 && vortices[i].swirl <= 0.0005) {
+        vortices.splice(i, 1);
+      }
+    }
 
     const posAttr = points.geometry.attributes.position;
     const p = posAttr.array;
@@ -217,69 +243,60 @@
       let x = p[i], y = p[i + 1], z = p[i + 2];
       let vx = velocities[i], vy = velocities[i + 1], vz = velocities[i + 2];
 
-      // Proyecta a NDC para decidir influencia por distancia en pantalla
-      tmpV.set(x, y, z);
-      tmpN.copy(tmpV).project(camera);
-
-      const sd = Math.hypot(tmpN.x - mouseNdc.x, tmpN.y - mouseNdc.y);
-      const infl = Math.max(0, 1 - Math.min(sd / params.influenceNdcRadius, 1));
-
-      // Idle noise (barato)
+      // ruido base (idle)
       vx += (Math.random() - 0.5) * params.noise;
       vy += (Math.random() - 0.5) * params.noise;
       vz += (Math.random() - 0.5) * params.noise;
 
-      // Atracción (con GSAP u.attract)
-      if (u.attract > 0.001 && infl > 0.001) {
-        const dx = cursor3D.x - x;
-        const dy = cursor3D.y - y;
-        const dz = cursor3D.z - z;
+      // Aplica cada vórtice (local)
+      for (let k = 0; k < vortices.length; k++) {
+        const v = vortices[k];
+        if (v.strength <= 0.0001 && v.swirl <= 0.0001) continue;
 
+        const dx = v.pos.x - x;
+        const dy = v.pos.y - y;
+        const dz = v.pos.z - z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6;
-        const pull = params.maxForce * u.attract * (infl * infl);
 
+        // Solo afecta si está cerca del vórtice
+        const R = params.vortexRadius;
+        if (dist > R) continue;
+
+        // Influencia fuerte cerca, cae hacia el borde
+        const influence = 1 - (dist / R);
+        const inf2 = influence * influence;
+
+        // Pull hacia el centro (crea “forma”)
+        const pull = params.vortexPull * v.strength * inf2;
         vx += (dx / dist) * pull;
         vy += (dy / dist) * pull;
         vz += (dz / dist) * pull;
 
-        // Swirl (tangente)
-        if (u.swirl > 0.001) {
-          // tangente simple alrededor del vector hacia cursor
-          const sx = -dy;
-          const sy = dx;
-          const swirl = params.swirlBase * u.swirl * (infl * infl);
+        // Swirl en el plano XY (remolino alrededor del punto)
+        const swirl = params.vortexSwirl * v.swirl * inf2;
+        // tangente simple: rota (dx,dy) -> (-dy, dx)
+        vx += (-dy / dist) * swirl;
+        vy += ( dx / dist) * swirl;
 
-          vx += (sx / (dist + 1e-6)) * swirl;
-          vy += (sy / (dist + 1e-6)) * swirl;
-        }
+        // Turbulencia adicional cerca del centro para “dibujar” curvas
+        const turb = params.vortexTurbulence * v.swirl * inf2;
+        vx += (Math.random() - 0.5) * turb;
+        vy += (Math.random() - 0.5) * turb;
+        vz += (Math.random() - 0.5) * (turb * 0.6);
       }
 
-      // Release kick (al soltar)
-      if (u.release > 0.001) {
-        // empuja desde el cursor hacia afuera
-        const rx = x - cursor3D.x;
-        const ry = y - cursor3D.y;
-        const rz = z - cursor3D.z;
-        const rd = Math.sqrt(rx * rx + ry * ry + rz * rz) + 1e-6;
-
-        const kick = params.releaseKick * u.release * (0.6 + Math.random() * 0.6);
-        vx += (rx / rd) * kick;
-        vy += (ry / rd) * kick;
-        vz += (rz / rd) * kick;
-      }
-
-      // Damping
+      // damping
       vx *= params.damping; vy *= params.damping; vz *= params.damping;
 
-      // Integración
       x += vx; y += vy; z += vz;
 
-      // Bound suave: vuelve hacia dentro si se va demasiado lejos
+      // bound suave: mantenemos la nube compacta
       const len = Math.sqrt(x * x + y * y + z * z);
-      if (len > params.radius * 1.25) {
-        const k = (params.radius * 1.25) / (len + 1e-6);
+      const maxR = params.radius * params.maxRadiusFactor;
+      if (len > maxR) {
+        const k = maxR / (len + 1e-6);
         x *= k; y *= k; z *= k;
-        vx *= 0.4; vy *= 0.4; vz *= 0.4;
+        vx *= 0.35; vy *= 0.35; vz *= 0.35;
       }
 
       p[i] = x; p[i + 1] = y; p[i + 2] = z;
@@ -290,18 +307,12 @@
     renderer.render(scene, camera);
   }
 
-  // ========= START =========
-  function startWhenReady() {
-    if (typeof THREE === "undefined" || typeof gsap === "undefined") {
-      console.warn("Missing THREE or GSAP");
-      return;
-    }
+  if (document.readyState === "loading") {
+    window.addEventListener("DOMContentLoaded", init);
+  } else {
     init();
   }
-
-  if (document.readyState === "loading") {
-    window.addEventListener("DOMContentLoaded", startWhenReady);
-  } else {
-    startWhenReady();
-  }
 })();
+
+ 
+     
